@@ -62,7 +62,6 @@ Thumbs.db
 
 # uv
 .python-version
-uv.lock
 
 # Distribution
 dist/
