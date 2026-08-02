@@ -1,7 +1,7 @@
 [project]
 name = "singleflight-auth"
-version = "0.1.0"
-description = "Single-flight token refresh for httpx and requests: parallel 401s trigger refresh exactly once."
+version = "0.1.1"
+description = "Single-flight token refresh for httpx and requests. Prevents auth cache stampedes."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "CC-BY-ND-4.0"
