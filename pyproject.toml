@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Single-flight token refresh for httpx and requests: parallel 401s trigger refresh exactly once."
 readme = "README.md"
 requires-python = ">=3.9"
-license = "MIT"
+license = "CC-BY-ND-4.0"
 authors = [
     { name = "alibeg-begow", email = "alibegbegow@gmail.com" },
 ]
@@ -12,7 +12,6 @@ keywords = ["httpx", "requests", "auth", "jwt", "token-refresh", "concurrency", 
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
