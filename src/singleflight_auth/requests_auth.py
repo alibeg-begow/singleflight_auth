@@ -94,7 +94,7 @@ class SingleFlightAuth(requests.auth.AuthBase):
         # concurrent threads each track their own state independently.
         request._sf_token_used = token  # type: ignore[attr-defined]
         request._sf_retry_count = 0  # type: ignore[attr-defined]
-        request.register_hook("response", self._on_response)
+        request.register_hook("response", self._on_response)  # type: ignore[no-untyped-call]
         return request
 
     def _on_response(
