@@ -1,6 +1,6 @@
 [project]
 name = "singleflight-auth"
-version = "0.1.1"
+version = "0.1.2"
 description = "Single-flight token refresh for httpx and requests. Prevents auth cache stampedes."
 readme = "README.md"
 requires-python = ">=3.10"
