@@ -271,6 +271,4 @@ uv run ruff check .
 
 ## License
 
-This project is licensed under the **Creative Commons Attribution-NoDerivatives 4.0 International License** (CC BY-ND 4.0).
-
-You are free to share and use this software, but you may not distribute modified versions. See [LICENSE](LICENSE) for the full text, or visit [creativecommons.org/licenses/by-nd/4.0](https://creativecommons.org/licenses/by-nd/4.0/).
+This project is licensed the **MIT License**.
