@@ -29,8 +29,7 @@ Neither path ever touches the wrong lock type.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Awaitable, Generator
-from typing import Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 
 import httpx
 

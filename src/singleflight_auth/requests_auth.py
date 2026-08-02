@@ -18,7 +18,7 @@ per-request so concurrent threads never interfere with each other's counters.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import requests
 import requests.auth
