@@ -58,18 +58,15 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff]
-line-length = 88
+line-length = 100
 target-version = "py39"
 
 [tool.ruff.lint]
-select = [
-    "E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "PLC", "PLE", "PLW", "RET", "RUF"
-]
-ignore = []
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
 [tool.mypy]
 strict = true
-python_version = "3.9"
+python_version = "3.10"
 
 [[tool.uv.index]]
 name = "testpypi"
