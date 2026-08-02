@@ -7,8 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.1] - 2026-08-02
 
+### Changed
+- Changed license from CC BY-ND 4.0 to MIT to allow modifications in forks
+
 ### Fixed
 - Fixed strict `mypy` error in CI by adding `types-requests` and `type: ignore` to `requests_auth.py`
+- Fixed a trivially true assertion in `test_edge_cases.py`
 
 ## [0.1.0] - 2026-08-02
 

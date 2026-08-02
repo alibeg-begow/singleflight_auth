@@ -4,14 +4,15 @@ version = "0.1.1"
 description = "Single-flight token refresh for httpx and requests. Prevents auth cache stampedes."
 readme = "README.md"
 requires-python = ">=3.9"
-license = "CC-BY-ND-4.0"
+license = { text = "MIT" }
 authors = [
     { name = "alibeg-begow", email = "alibegbegow@gmail.com" },
 ]
 keywords = ["httpx", "requests", "auth", "jwt", "token-refresh", "concurrency", "single-flight", "401", "race-condition"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -57,15 +58,18 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff]
-line-length = 100
+line-length = 88
 target-version = "py39"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ASYNC"]
+select = [
+    "E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "PLC", "PLE", "PLW", "RET", "RUF"
+]
+ignore = []
 
 [tool.mypy]
 strict = true
-python_version = "3.10"
+python_version = "3.9"
 
 [[tool.uv.index]]
 name = "testpypi"

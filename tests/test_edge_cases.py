@@ -127,8 +127,8 @@ class TestMixedStatusCodes:
 
         # 500s must never trigger refresh — refresh is only for 401s
         statuses = [r.status_code for r in results if isinstance(r, httpx.Response)]
-        assert 500 not in [s for s in statuses if s == 401], (
-            "500 responses must not cause refresh calls"
+        assert 500 in statuses, (
+            "500 responses must not be swallowed or incorrectly retried"
         )
         # Regardless of how many requests triggered a refresh, it must be ≤ 1
         assert refresh_calls <= 1, (
