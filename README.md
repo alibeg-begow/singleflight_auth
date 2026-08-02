@@ -2,8 +2,8 @@
 
 > **Single-flight token refresh for `httpx` and `requests`**: when hundreds or thousands of parallel requests all get a 401, your `refresh()` function is called **exactly once**.
 
-[![PyPI version](https://img.shields.io/pypi/v/singleflight-auth.svg)](https://pypi.org/project/singleflight-auth/)
-[![Python versions](https://img.shields.io/pypi/pyversions/singleflight-auth.svg)](https://pypi.org/project/singleflight-auth/)
+[![PyPI version](https://img.shields.io/pypi/v/singleflight-auth.svg?v=1)](https://pypi.org/project/singleflight-auth/)
+[![Python versions](https://img.shields.io/pypi/pyversions/singleflight-auth.svg?v=1)](https://pypi.org/project/singleflight-auth/)
 [![License: CC BY-ND 4.0](https://img.shields.io/badge/License-CC%20BY--ND%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nd/4.0/)
 [![CI](https://github.com/alibeg-begow/singleflight_auth/actions/workflows/ci.yml/badge.svg)](https://github.com/alibeg-begow/singleflight_auth/actions/workflows/ci.yml)
 [![Typed](https://img.shields.io/badge/typing-typed-blue.svg)](https://peps.python.org/pep-0561/)
