@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.1] - 2026-08-02
 
 ### Changed
+- **BREAKING**: Dropped support for Python 3.9 (minimum supported version is now 3.10)
 - Changed license from CC BY-ND 4.0 to MIT to allow modifications in forks
 
 ### Fixed
@@ -25,4 +26,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `py.typed` marker for PEP 561 compliance
 - Concurrency stress tests (50 concurrent 401s → exactly 1 refresh call)
 - Full type annotations with `mypy --strict` passing
-- CI workflow for Python 3.9–3.13
+- CI workflow for Python 3.10–3.13
