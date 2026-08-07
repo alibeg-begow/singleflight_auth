@@ -128,7 +128,8 @@ class SingleFlightAuth(requests.auth.AuthBase):
         """Inject the current token and register the response hook."""
         token = self._get_token()
         request.headers["Authorization"] = f"Bearer {token}"
-        # Store the token used and retry count on the request object so concurrent threads each track their own state independently.
+        # Store the token used and retry count on the request object so
+        # concurrent threads each track their own state independently.
         request._sf_token_used = token  # type: ignore[attr-defined]
         request._sf_retry_count = 0  # type: ignore[attr-defined]
         request.register_hook("response", self._on_response)  # type: ignore[no-untyped-call]
