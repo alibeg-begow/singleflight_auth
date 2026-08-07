@@ -197,9 +197,16 @@ session.auth = auth
 |---|---|
 | `RefreshFailedError` | Your `refresh()` callable raised an exception, or returned an empty/None token |
 | `MaxRetriesExceededError` | Still getting 401 after `max_retries` refresh attempts |
+| `ReentrantRefreshError` | `refresh()` triggered the auth flow on the same client/session (would deadlock) |
+| `NonReplayableBodyError` | Request body is a stream/generator/file that cannot be replayed for retry |
 
 ```python
-from singleflight_auth import RefreshFailedError, MaxRetriesExceededError
+from singleflight_auth import (
+    RefreshFailedError,
+    MaxRetriesExceededError,
+    ReentrantRefreshError,
+    NonReplayableBodyError,
+)
 
 try:
     response = client.get("/protected")
@@ -209,32 +216,60 @@ except RefreshFailedError as e:
 except MaxRetriesExceededError:
     # Server keeps returning 401 even after refresh — something is very wrong
     logger.error("Max retries exceeded, giving up")
+except ReentrantRefreshError:
+    # refresh() accidentally used the same client — fix your refresh() code
+    logger.error("refresh() must use a separate client!")
+except NonReplayableBodyError:
+    # Streaming upload got a 401 — buffer the body or handle differently
+    logger.error("Cannot retry streaming uploads")
 ```
 
 ---
 
-## The Proof — Concurrency Stress Test
+## Important Usage Notes
 
-This is the test that proves the library's core promise. It's in the test suite and runs in CI:
+### `refresh()` must use a separate client
+
+The `refresh()` callable must **never** use the same `httpx.Client` / `httpx.AsyncClient` / `requests.Session` that has this auth handler attached. If it does, and the refresh endpoint also returns 401, the coordinator will detect the reentrant lock acquisition and raise `ReentrantRefreshError`.
 
 ```python
-@pytest.mark.asyncio
-async def test_only_one_refresh_under_50_concurrent_401s(httpserver):
-    state = {"token": "expired", "refresh_calls": 0}
+# Correct — uses a standalone httpx.post() without auth
+def refresh() -> str:
+    resp = httpx.post("https://auth.example.com/token", json={...})
+    return resp.json()["access_token"]
 
-    async def refresh() -> str:
-        await asyncio.sleep(0.05)  # simulate real network latency
-        state["refresh_calls"] += 1
-        state["token"] = "fresh"
-        return "fresh"
+# Wrong — reuses the client that has SingleFlightAuth attached
+def refresh() -> str:
+    resp = client.post("https://auth.example.com/token")  # DANGER: same client!
+    return resp.json()["access_token"]
+```
 
-    auth = AsyncSingleFlightAuth(get_token=lambda: state["token"], refresh=refresh)
+### Share a single auth instance
 
-    async with httpx.AsyncClient(auth=auth, base_url=httpserver.url_for("/")) as client:
-        responses = await asyncio.gather(*[client.get("/protected") for _ in range(50)])
+The single-flight guarantee only works when all requests share the **same** auth instance. Each instance has its own lock, so creating a new `SingleFlightAuth(...)` per request defeats the entire purpose.
 
-    assert all(r.status_code == 200 for r in responses)
-    assert state["refresh_calls"] == 1  # ← THIS IS THE ENTIRE POINT
+```python
+# Correct — one instance shared everywhere
+auth = SingleFlightAuth(get_token=..., refresh=...)
+client = httpx.Client(auth=auth)
+
+# Wrong — new instance per request means N refreshes instead of 1
+for url in urls:
+    auth = SingleFlightAuth(get_token=..., refresh=...)  # WRONG
+    httpx.get(url, auth=auth)
+```
+
+### Stream/generator/file bodies are not retry-safe
+
+If the request body is a generator, file handle, or other one-shot stream, it is consumed on the first send and cannot be replayed. Instead of silently sending an empty body, `NonReplayableBodyError` is raised. Buffer the body into `bytes` before sending:
+
+```python
+# Correct — body is bytes, safe to retry
+data = my_file.read()
+client.post("/upload", content=data)
+
+# Risky — generator body cannot be replayed on 401
+client.post("/upload", content=my_generator())
 ```
 
 ---
@@ -250,6 +285,7 @@ Intentionally out of scope for v0.1:
 | **Single-process only** | Uses in-process locks (`threading.Lock` / `asyncio.Lock`); does not work across multiple processes or machines (e.g., Gunicorn workers) |
 | **No `aiohttp` support** | `httpx` + `requests` only for v0.1 |
 | **Reactive only** | Refreshes on 401; no proactive TTL-based refresh |
+| **Stream bodies not retried** | Generator/file/stream request bodies raise `NonReplayableBodyError` on 401 instead of silently losing data |
 
 ---
 
@@ -271,4 +307,4 @@ uv run ruff check .
 
 ## License
 
-This project is licensed the **MIT License**.
+This project is licensed under the [MIT License](LICENSE).

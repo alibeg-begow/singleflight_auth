@@ -18,13 +18,33 @@ per-request so concurrent threads never interfere with each other's counters.
 
 from __future__ import annotations
 
+import io
 from collections.abc import Callable
 
 import requests
 import requests.auth
 
 from ._core import SyncCoordinator
-from ._exceptions import MaxRetriesExceededError, RefreshFailedError
+from ._exceptions import MaxRetriesExceededError, NonReplayableBodyError, RefreshFailedError
+
+
+def _is_replayable_body(body: object) -> bool:
+    """Check if a requests body can safely be replayed on retry.
+
+    ``bytes``, ``str``, ``None``, and ``dict`` bodies are safe because they
+    are fully in-memory and deterministic.  File-like objects, generators,
+    and iterators are single-use and cannot be re-read.
+    """
+    if body is None:
+        return True
+    if isinstance(body, (bytes, str, memoryview)):
+        return True
+    # BytesIO can be seeked back to 0 — but we'd need to do it ourselves,
+    # and PreparedRequest.copy() doesn't seek.  Treat as non-replayable
+    # unless it's a trivial case.
+    if isinstance(body, io.BytesIO):
+        return True
+    return False
 
 
 class SingleFlightAuth(requests.auth.AuthBase):
@@ -34,6 +54,21 @@ class SingleFlightAuth(requests.auth.AuthBase):
     directly to a single request.  When a response matches
     ``is_unauthorized`` the coordinator acquires a lock, optionally calls
     ``refresh()``, and re-sends the request with the new token.
+
+    .. warning::
+
+       **refresh() must use a separate session.**  If ``refresh()`` makes
+       an HTTP request through the **same** session that has this auth
+       handler attached, and that request also receives a 401, the
+       coordinator will detect the reentrant lock acquisition and raise
+       :class:`ReentrantRefreshError` instead of deadlocking.
+
+    .. warning::
+
+       **Stream/generator/file bodies are not retry-safe.**  If the request
+       body is a generator, file, or other one-shot stream, it cannot be
+       replayed after a 401.  In this case :class:`NonReplayableBodyError`
+       is raised instead of silently sending an empty body or hanging.
 
     Args:
         get_token:       Returns the current bearer token (no I/O).
@@ -45,6 +80,9 @@ class SingleFlightAuth(requests.auth.AuthBase):
     Raises:
         RefreshFailedError:      ``refresh()`` raised an exception.
         MaxRetriesExceededError: Still unauthorized after ``max_retries``.
+        ReentrantRefreshError:   ``refresh()`` triggered the auth flow on the
+                                 same session.
+        NonReplayableBodyError:  Request body cannot be replayed for retry.
 
     Example::
 
@@ -106,8 +144,18 @@ class SingleFlightAuth(requests.auth.AuthBase):
 
         retried: int = getattr(response.request, "_sf_retry_count", 0)
         if retried >= self._max_retries:
+            response.content  # noqa: B018 — intentional side-effect to release connection
             raise MaxRetriesExceededError(
                 f"Still unauthorized after {self._max_retries} retry attempt(s)"
+            )
+
+        if not _is_replayable_body(response.request.body):
+            response.content  # noqa: B018 — release connection
+            raise NonReplayableBodyError(
+                "Cannot retry a request with a non-replayable body "
+                "(generator, file, or stream). Buffer the body into bytes "
+                "before sending, or handle token refresh at a higher layer. "
+                "See: https://github.com/alibeg-begow/singleflight_auth#limitations"
             )
 
         stale_token: str = getattr(response.request, "_sf_token_used", "")

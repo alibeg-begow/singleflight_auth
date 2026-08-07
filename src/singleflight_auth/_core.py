@@ -15,6 +15,12 @@ Algorithm (same for both sync and async variants):
 
 This means N concurrent requests racing on the same stale token produce
 exactly 1 refresh call; the remaining N-1 get the new token for free.
+
+**Reentrancy protection:** ``threading.Lock`` and ``asyncio.Lock`` are *not*
+reentrant.  If ``refresh()`` triggers the auth flow on the same client
+(causing ``resolve()`` to be called again from the same thread/task), the
+process would deadlock silently.  Instead, the coordinators track the
+current holder and raise :class:`ReentrantRefreshError` immediately.
 """
 
 from __future__ import annotations
@@ -23,6 +29,8 @@ import asyncio
 import threading
 from collections.abc import Awaitable, Callable
 from typing import Generic, TypeVar
+
+from ._exceptions import ReentrantRefreshError
 
 T = TypeVar("T")
 
@@ -57,6 +65,7 @@ class SyncCoordinator(Generic[T]):
         self._get_token = get_token
         self._refresh = refresh
         self._lock = threading.Lock()
+        self._holder_thread: int | None = None
 
     def resolve(self, stale_token: T) -> T:
         """Return a valid token, calling ``refresh()`` at most once per stale value.
@@ -67,16 +76,34 @@ class SyncCoordinator(Generic[T]):
         Returns:
             A fresh token — either fetched by this call or already obtained
             by another thread that won the race.
+
+        Raises:
+            ReentrantRefreshError: If the current thread already holds the
+                lock (i.e. ``refresh()`` triggered a nested auth flow on
+                the same client).
         """
+        current_thread = threading.get_ident()
+        if self._holder_thread == current_thread:
+            raise ReentrantRefreshError(
+                "refresh() triggered the auth flow on the same client/session, "
+                "causing a reentrant lock acquisition on the same thread. "
+                "Use a separate, unauthenticated client inside refresh(). "
+                "See: https://github.com/alibeg-begow/singleflight_auth#refresh-must-use-a-separate-client"
+            )
+
         with self._lock:
-            # Double-check: another thread may have already refreshed while
-            # we were waiting for the lock.
-            current = self._get_token()
-            if current != stale_token:
-                # Someone else refreshed; use their result.
-                return current
-            # We are the winner — perform the refresh.
-            return self._refresh()
+            self._holder_thread = current_thread
+            try:
+                # Double-check: another thread may have already refreshed while
+                # we were waiting for the lock.
+                current = self._get_token()
+                if current != stale_token:
+                    # Someone else refreshed; use their result.
+                    return current
+                # We are the winner — perform the refresh.
+                return self._refresh()
+            finally:
+                self._holder_thread = None
 
 
 class AsyncCoordinator(Generic[T]):
@@ -109,6 +136,7 @@ class AsyncCoordinator(Generic[T]):
         self._get_token = get_token
         self._refresh = refresh
         self._lock = asyncio.Lock()
+        self._holder_task: int | None = None
 
     async def resolve(self, stale_token: T) -> T:
         """Return a valid token, calling ``refresh()`` at most once per stale value.
@@ -119,13 +147,31 @@ class AsyncCoordinator(Generic[T]):
         Returns:
             A fresh token — either fetched by this coroutine or already obtained
             by another coroutine that won the race.
+
+        Raises:
+            ReentrantRefreshError: If the current task already holds the
+                lock (i.e. ``refresh()`` triggered a nested auth flow on
+                the same async client).
         """
+        current_task = id(asyncio.current_task())
+        if self._holder_task == current_task:
+            raise ReentrantRefreshError(
+                "refresh() triggered the auth flow on the same async client, "
+                "causing a reentrant lock acquisition on the same task. "
+                "Use a separate, unauthenticated async client inside refresh(). "
+                "See: https://github.com/alibeg-begow/singleflight_auth#refresh-must-use-a-separate-client"
+            )
+
         async with self._lock:
-            # Double-check: another coroutine may have refreshed while we
-            # were suspended waiting for the lock.
-            current = self._get_token()
-            if current != stale_token:
-                # Someone else refreshed; use their result.
-                return current
-            # We are the winner — perform the async refresh.
-            return await self._refresh()
+            self._holder_task = current_task
+            try:
+                # Double-check: another coroutine may have refreshed while we
+                # were suspended waiting for the lock.
+                current = self._get_token()
+                if current != stale_token:
+                    # Someone else refreshed; use their result.
+                    return current
+                # We are the winner — perform the async refresh.
+                return await self._refresh()
+            finally:
+                self._holder_task = None

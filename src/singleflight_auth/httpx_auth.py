@@ -34,7 +34,22 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 import httpx
 
 from ._core import AsyncCoordinator, SyncCoordinator
-from ._exceptions import MaxRetriesExceededError, RefreshFailedError
+from ._exceptions import MaxRetriesExceededError, NonReplayableBodyError, RefreshFailedError
+
+
+def _is_replayable_stream(stream: httpx.SyncByteStream | httpx.AsyncByteStream) -> bool:
+    """Check if a request body stream can safely be replayed on retry.
+
+    httpx wraps all bodies into stream objects.  ``bytes``/``str``/``dict``
+    bodies become a :class:`httpx.ByteStream` which stores the data in memory
+    and can be read multiple times.  Generator and file-like bodies become
+    single-use streams that cannot be re-read.
+
+    We check for :class:`httpx.ByteStream` specifically — it is the only
+    built-in stream type that is guaranteed safe for replay.
+    """
+    # ByteStream wraps in-memory bytes — always safe to replay
+    return isinstance(stream, httpx.ByteStream)
 
 
 class SingleFlightAuth(httpx.Auth):
@@ -44,6 +59,21 @@ class SingleFlightAuth(httpx.Auth):
     response matches ``is_unauthorized`` the coordinator acquires a lock,
     optionally calls ``refresh()``, updates the ``Authorization`` header, and
     retries the request — all transparently.
+
+    .. warning::
+
+       **refresh() must use a separate client.**  If ``refresh()`` makes an
+       HTTP request through the **same** :class:`httpx.Client` that has this
+       auth handler attached, and that request also receives a 401, the
+       coordinator will detect the reentrant lock acquisition and raise
+       :class:`ReentrantRefreshError` instead of deadlocking.
+
+    .. warning::
+
+       **Stream/generator/file bodies are not retry-safe.**  If the request
+       body is a generator, file, or other one-shot stream, it cannot be
+       replayed after a 401.  In this case :class:`NonReplayableBodyError`
+       is raised instead of silently sending an empty body.
 
     Args:
         get_token:       Returns the current bearer token (no I/O).
@@ -57,6 +87,10 @@ class SingleFlightAuth(httpx.Auth):
         RefreshFailedError:      ``refresh()`` raised an exception.
         MaxRetriesExceededError: Server still returns an unauthorized response
                                  after ``max_retries`` attempts.
+        ReentrantRefreshError:   ``refresh()`` triggered the auth flow on the
+                                 same client (would deadlock).
+        NonReplayableBodyError:  Request body is a stream/generator that cannot
+                                 be replayed for the retry.
 
     Example::
 
@@ -107,6 +141,13 @@ class SingleFlightAuth(httpx.Auth):
 
         retries = 0
         while self._is_unauthorized(response) and retries < self._max_retries:
+            if not _is_replayable_stream(request.stream):
+                raise NonReplayableBodyError(
+                    "Cannot retry a request with a non-replayable body "
+                    "(generator, file, or stream). Buffer the body into bytes "
+                    "before sending, or handle token refresh at a higher layer. "
+                    "See: https://github.com/alibeg-begow/singleflight_auth#limitations"
+                )
             retries += 1
             new_token = self._coordinator.resolve(stale_token=token)
             token = new_token
@@ -126,6 +167,16 @@ class AsyncSingleFlightAuth(httpx.Auth):
     The internal lock is :class:`asyncio.Lock` — it never blocks the event
     loop while waiting for an in-flight refresh.
 
+    .. warning::
+
+       **refresh() must use a separate client.**  See :class:`SingleFlightAuth`
+       for details on the reentrant lock protection.
+
+    .. warning::
+
+       **Stream/generator/file bodies are not retry-safe.**  See
+       :class:`SingleFlightAuth` for details.
+
     Args:
         get_token:       Returns the current bearer token (sync, no I/O).
         refresh:         Async callable; fetches and persists a new token,
@@ -136,6 +187,9 @@ class AsyncSingleFlightAuth(httpx.Auth):
     Raises:
         RefreshFailedError:      ``refresh()`` raised an exception.
         MaxRetriesExceededError: Still unauthorized after ``max_retries``.
+        ReentrantRefreshError:   ``refresh()`` triggered the auth flow on the
+                                 same async client.
+        NonReplayableBodyError:  Request body cannot be replayed.
 
     Example::
 
@@ -188,6 +242,13 @@ class AsyncSingleFlightAuth(httpx.Auth):
 
         retries = 0
         while self._is_unauthorized(response) and retries < self._max_retries:
+            if not _is_replayable_stream(request.stream):
+                raise NonReplayableBodyError(
+                    "Cannot retry a request with a non-replayable body "
+                    "(generator, file, or stream). Buffer the body into bytes "
+                    "before sending, or handle token refresh at a higher layer. "
+                    "See: https://github.com/alibeg-begow/singleflight_auth#limitations"
+                )
             retries += 1
             new_token = await self._coordinator.resolve(stale_token=token)
             token = new_token

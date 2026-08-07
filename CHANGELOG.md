@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-08-07
+
+### Added
+- Deadlock detection: raise `ReentrantRefreshError` when `refresh()` uses the same client/session
+- Stream body protection: raise `NonReplayableBodyError` on 401 retry to prevent silent data loss
+
+### Fixed
+- Fixed a connection leak in `requests` flow when `MaxRetriesExceededError` is raised
+- Updated documentation with important usage notes and corrected license text
+
 ## [0.1.2] - 2026-08-03
 
 ### Changed
