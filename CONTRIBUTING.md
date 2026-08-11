@@ -19,7 +19,7 @@ uv sync --all-extras --dev
 uv run pytest -v
 
 # Type check
-uv run mypy src --strict
+uv run mypy src tests --strict
 
 # Lint
 uv run ruff check .
@@ -34,6 +34,9 @@ uv run pytest -v
 
 # Concurrency stress tests only
 uv run pytest tests/test_concurrency_stress.py -v
+
+# Repeat the race-sensitive suites (a single green run proves little)
+uv run pytest tests/test_concurrency_stress.py tests/test_core.py --count=20
 
 # With coverage
 uv run pytest --cov=singleflight_auth --cov-report=term-missing
@@ -62,12 +65,12 @@ docs: update README with async example
 
 Please read the "Out of scope" section in `README.md` before proposing new features.
 In particular, OAuth2 flow implementations, token storage, multi-process locks,
-aiohttp support, and proactive token refresh are **intentionally excluded from v0.1**.
+aiohttp support, and proactive token refresh are **intentionally excluded**.
 
 ## Pull Request Checklist
 
 - [ ] Tests added/updated for the change
 - [ ] `uv run pytest -v` passes
-- [ ] `uv run mypy src --strict` passes (zero errors)
+- [ ] `uv run mypy src tests --strict` passes (zero errors)
 - [ ] `uv run ruff check .` passes
 - [ ] CHANGELOG.md updated under `[Unreleased]`
