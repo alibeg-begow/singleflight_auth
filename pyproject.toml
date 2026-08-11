@@ -27,11 +27,17 @@ classifiers = [
 [project.optional-dependencies]
 httpx = ["httpx>=0.24"]
 requests = ["requests>=2.28"]
+# Floors here are *test tooling*, not shipped constraints — they are pinned to
+# the oldest versions that actually work, so the minimum-versions CI job
+# exercises the real `httpx`/`requests` floors instead of tripping over a
+# broken test harness.  pytest-httpserver < 1.1.0 has no `threaded=` argument
+# (needed to reproduce genuine 401 contention) and < 1.0.8 cannot import
+# against modern werkzeug at all.
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
-    "pytest-httpserver>=1.0",
+    "pytest-httpserver>=1.1.0",
     "pytest-repeat>=0.9",
     "mypy>=1.10",
     "ruff>=0.6",
