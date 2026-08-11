@@ -79,10 +79,15 @@ jobs:
         extra: ["", "[httpx]", "[requests]", "[httpx,requests]"]
         artifact: [wheel, sdist]
 
+    # Deliberately plain: stock setup-python, stdlib venv, stock pip.  This job
+    # answers "can a user install the published artifact and import it", so it
+    # should install the way users do, with as few moving parts as possible.
+    # The steps are split finer than usual so a failure names the exact command
+    # in the checks UI, without needing to open the log.
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -91,12 +96,11 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Show the environment we are installing into
-        run: |
-          uv --version
-          ls -la dist/
+      - name: List the downloaded artifacts
+        run: ls -la dist/
 
-      - name: Install just this path
+      - name: The requested artifact exists
+        id: artifact
         run: |
           set -euxo pipefail
           if [ "${{ matrix.artifact }}" = "wheel" ]; then
@@ -104,11 +108,18 @@ jobs:
           else
             target="$(ls dist/*.tar.gz)"
           fi
-          uv venv .venv
-          # PEP 508 direct reference: the unambiguous way to combine extras
-          # with a local artifact ("path.whl[extra]" is not portable syntax).
-          uv pip install --python .venv \
-            "singleflight-auth${{ matrix.extra }} @ file://$(readlink -f "$target")"
+          echo "path=$(readlink -f "$target")" >> "$GITHUB_OUTPUT"
+
+      - name: Create a clean virtualenv
+        run: python -m venv .venv
+
+      - name: Install the artifact
+        run: |
+          set -euxo pipefail
+          # PEP 508 direct reference — the portable way to combine extras with
+          # a local file ("path.whl[extra]" is not valid requirement syntax).
+          ./.venv/bin/python -m pip install \
+            "singleflight-auth${{ matrix.extra }} @ file://${{ steps.artifact.outputs.path }}"
 
       - name: Import smoke test
         run: ./.venv/bin/python -c "import singleflight_auth; print(singleflight_auth.__version__)"
@@ -151,15 +162,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.13t"
 
-      - name: Install dependencies
-        run: uv sync --all-extras --dev
+      - name: Create a clean virtualenv
+        run: python -m venv .venv
 
-      - name: Run tests
-        run: uv run pytest -q --tb=short --count=5 tests/test_core.py tests/test_concurrency_stress.py
+      - name: Install only the coordinator test dependencies
+        # test_core.py drives the locks directly and needs no HTTP stack, so
+        # this job does not wait on httpx/werkzeug shipping free-threaded
+        # wheels.  Narrow on purpose: the thing under test here is the
+        # threading.local / ContextVar / WeakKeyDictionary handling.
+        run: |
+          set -euxo pipefail
+          ./.venv/bin/python -m pip install --upgrade pip
+          ./.venv/bin/python -m pip install pytest pytest-asyncio pytest-repeat
+          ./.venv/bin/python -m pip install --no-deps .
+
+      - name: Confirm the interpreter really is free-threaded
+        run: |
+          ./.venv/bin/python -c "import sys; print('GIL disabled:', not sys._is_gil_enabled())"
+
+      - name: Run the coordinator tests
+        run: ./.venv/bin/python -m pytest tests/test_core.py -q --tb=short --count=5
 
   # Races are timing-dependent: a single green run proves little.
   repeat-stress:
