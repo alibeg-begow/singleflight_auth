@@ -23,7 +23,6 @@ from werkzeug.wrappers import Request, Response
 
 from singleflight_auth import (
     AsyncSingleFlightAuth,
-    MaxRetriesExceededError,
     RefreshFailedError,
     RequestsSingleFlightAuth,
     SingleFlightAuth,
@@ -142,8 +141,8 @@ class TestMixedStatusCodes:
 
 
 class TestMaxRetriesBoundary:
-    def test_max_retries_zero_raises_immediately(self, httpserver: HTTPServer) -> None:
-        """With max_retries=0, the first 401 raises MaxRetriesExceededError without refresh."""
+    def test_max_retries_zero_returns_the_response(self, httpserver: HTTPServer) -> None:
+        """max_retries=0 means 'do not refresh, hand me the 401' — not 'raise'."""
         refresh_calls = 0
         httpserver.expect_request("/ep").respond_with_data("", status=401)
 
@@ -159,10 +158,30 @@ class TestMaxRetriesBoundary:
         )
 
         with httpx.Client(auth=auth, base_url=httpserver.url_for("/")) as client:
-            with pytest.raises(MaxRetriesExceededError):
-                client.get("/ep")
+            resp = client.get("/ep")
 
+        assert resp.status_code == 401
         assert refresh_calls == 0, "No refresh should occur with max_retries=0"
+
+    @pytest.mark.parametrize("max_retries", [-1, -5])
+    def test_negative_max_retries_rejected(self, max_retries: int) -> None:
+        """Negative retry counts silently behaved like 0 — now they are rejected."""
+
+        async def async_refresh() -> str:
+            return "t2"
+
+        with pytest.raises(ValueError, match="max_retries must be >= 0"):
+            SingleFlightAuth(
+                get_token=lambda: "t", refresh=lambda: "t2", max_retries=max_retries
+            )
+        with pytest.raises(ValueError, match="max_retries must be >= 0"):
+            AsyncSingleFlightAuth(
+                get_token=lambda: "t", refresh=async_refresh, max_retries=max_retries
+            )
+        with pytest.raises(ValueError, match="max_retries must be >= 0"):
+            RequestsSingleFlightAuth(
+                get_token=lambda: "t", refresh=lambda: "t2", max_retries=max_retries
+            )
 
     def test_max_retries_two_allows_two_retries(self, httpserver: HTTPServer) -> None:
         """With max_retries=2, the client retries twice before raising."""

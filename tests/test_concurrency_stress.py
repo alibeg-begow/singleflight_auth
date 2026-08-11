@@ -37,7 +37,8 @@ async def test_only_one_refresh_under_50_concurrent_401s(httpserver: HTTPServer)
     This is the canonical proof test from plan Section 6 / Phase 3.
     Failure here means the single-flight guarantee is broken.
     """
-    state = {"token": "expired", "refresh_calls": 0}
+    state: dict[str, str] = {"token": "expired"}
+    refresh_calls = 0
 
     def handler(request: Request) -> Response:
         auth_header = request.headers.get("Authorization", "")
@@ -49,8 +50,9 @@ async def test_only_one_refresh_under_50_concurrent_401s(httpserver: HTTPServer)
     httpserver.expect_request("/protected").respond_with_handler(handler)
 
     async def refresh() -> str:
+        nonlocal refresh_calls
         await asyncio.sleep(0.05)  # simulate real async network latency
-        state["refresh_calls"] += 1
+        refresh_calls += 1
         state["token"] = "fresh"
         return "fresh"
 
@@ -65,8 +67,8 @@ async def test_only_one_refresh_under_50_concurrent_401s(httpserver: HTTPServer)
     assert all(r.status_code == 200 for r in responses), (
         f"All 50 responses must be 200; got: {[r.status_code for r in responses]}"
     )
-    assert state["refresh_calls"] == 1, (
-        f"refresh() was called {state['refresh_calls']} times — must be exactly 1. "
+    assert refresh_calls == 1, (
+        f"refresh() was called {refresh_calls} times — must be exactly 1. "
         "The single-flight guarantee is broken."
     )
 
@@ -78,7 +80,8 @@ async def test_only_one_refresh_under_50_concurrent_401s(httpserver: HTTPServer)
 
 def test_only_one_refresh_under_50_concurrent_401s_sync(httpserver: HTTPServer) -> None:
     """50 concurrent sync threads all hitting 401 must trigger refresh exactly once."""
-    state = {"token": "expired", "refresh_calls": 0}
+    state: dict[str, str] = {"token": "expired"}
+    refresh_calls = 0
 
     def handler(request: Request) -> Response:
         auth_header = request.headers.get("Authorization", "")
@@ -89,8 +92,9 @@ def test_only_one_refresh_under_50_concurrent_401s_sync(httpserver: HTTPServer) 
     httpserver.expect_request("/protected").respond_with_handler(handler)
 
     def refresh() -> str:
+        nonlocal refresh_calls
         time.sleep(0.05)  # simulate real network latency
-        state["refresh_calls"] += 1
+        refresh_calls += 1
         state["token"] = "fresh"
         return "fresh"
 
@@ -109,8 +113,8 @@ def test_only_one_refresh_under_50_concurrent_401s_sync(httpserver: HTTPServer) 
     assert all(s == 200 for s in statuses), (
         f"All 50 responses must be 200; got: {statuses}"
     )
-    assert state["refresh_calls"] == 1, (
-        f"refresh() was called {state['refresh_calls']} times — must be exactly 1. "
+    assert refresh_calls == 1, (
+        f"refresh() was called {refresh_calls} times — must be exactly 1. "
         "The single-flight guarantee is broken."
     )
 
@@ -123,7 +127,9 @@ def test_only_one_refresh_under_50_concurrent_401s_sync(httpserver: HTTPServer) 
 @pytest.mark.asyncio
 async def test_second_wave_after_token_expires_again(httpserver: HTTPServer) -> None:
     """After the first refresh wave, if the token expires again, refresh fires once more."""
-    state = {"token": "stale-v1", "refresh_calls": 0, "valid_token": "stale-v2", "next_version": 2}
+    state: dict[str, str] = {"token": "stale-v1", "valid_token": "stale-v2"}
+    refresh_calls = 0
+    next_version = 2
 
     def handler(request: Request) -> Response:
         if request.headers.get("Authorization") == f"Bearer {state['valid_token']}":
@@ -133,10 +139,11 @@ async def test_second_wave_after_token_expires_again(httpserver: HTTPServer) -> 
     httpserver.expect_request("/api").respond_with_handler(handler)
 
     async def refresh() -> str:
+        nonlocal refresh_calls, next_version
         await asyncio.sleep(0.02)
-        state["refresh_calls"] += 1
-        new_token = f"stale-v{state['next_version']}"
-        state["next_version"] += 1
+        refresh_calls += 1
+        new_token = f"stale-v{next_version}"
+        next_version += 1
         state["token"] = new_token
         return new_token
 
@@ -148,7 +155,7 @@ async def test_second_wave_after_token_expires_again(httpserver: HTTPServer) -> 
     async with httpx.AsyncClient(auth=auth, base_url=httpserver.url_for("/")) as client:
         # Wave 1: 20 concurrent requests on stale-v1
         await asyncio.gather(*[client.get("/api") for _ in range(20)])
-        first_wave_calls = state["refresh_calls"]
+        first_wave_calls = refresh_calls
 
         # Simulate token expiring again
         state["token"] = "stale-v2"
@@ -158,6 +165,6 @@ async def test_second_wave_after_token_expires_again(httpserver: HTTPServer) -> 
         await asyncio.gather(*[client.get("/api") for _ in range(20)])
 
     assert first_wave_calls == 1, f"Wave 1 must have exactly 1 refresh; got {first_wave_calls}"
-    assert state["refresh_calls"] == 2, (
-        f"Total refresh calls must be 2 (one per wave); got {state['refresh_calls']}"
+    assert refresh_calls == 2, (
+        f"Total refresh calls must be 2 (one per wave); got {refresh_calls}"
     )

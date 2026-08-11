@@ -1,6 +1,6 @@
 # singleflight-auth
 
-> **Single-flight token refresh for `httpx` and `requests`**: when hundreds or thousands of parallel requests all get a 401, your `refresh()` function is called **exactly once**.
+> **Single-flight token refresh for `httpx` and `requests`**: when hundreds or thousands of parallel requests all get a 401, your `refresh()` function is called **exactly once** — per process. Coordination uses in-process locks, so a Gunicorn/Uvicorn deployment with 8 workers still performs up to 8 refreshes, one per worker. See [Limitations](#limitations).
 
 [![PyPI version](https://img.shields.io/pypi/v/singleflight-auth.svg?v=1)](https://pypi.org/project/singleflight-auth/)
 [![Python versions](https://img.shields.io/pypi/pyversions/singleflight-auth.svg?v=1)](https://pypi.org/project/singleflight-auth/)
@@ -109,7 +109,7 @@ The core uses **double-checked locking** — a well-known concurrency pattern ad
                     └──────────────────┬───────────────────────┘
                                        │
                     ┌──────────────────▼───────────────────────┐
-                    │     Each remembers stale token T_stale   │
+                    │   Each remembers the generation G it saw │
                     └──────────────────┬───────────────────────┘
                                        │
                     ┌──────────────────▼───────────────────────┐
@@ -118,15 +118,16 @@ The core uses **double-checked locking** — a well-known concurrency pattern ad
                     └──────────────────┬───────────────────────┘
                                        │
                     ┌──────────────────▼───────────────────────┐
-                    │    Re-read current token T_current       │
+                    │  Re-check: generation, then token value  │
                     └───────┬──────────────────────┬───────────┘
                             │                      │
-               T_current ≠ T_stale       T_current == T_stale
+                 generation moved,          both unchanged
+                 or token changed                  │
                             │                      │
-                    ┌───────▼──────┐      ┌────────▼──────────┐
+                    ┌───────▼──────┐      ┌────────▼───────────┐
                     │ Skip refresh │      │ YOU are the winner │
-                    │ Use T_current│      │ Call refresh()     │
-                    └───────┬──────┘      └────────┬──────────┘
+                    │ Use get_token│      │ Call refresh(), G+1│
+                    └───────┬──────┘      └────────┬───────────┘
                             │                      │
                     ┌───────▼──────────────────────▼───────────┐
                     │           Release lock                   │
@@ -140,8 +141,10 @@ Result: N concurrent 401s → exactly 1 refresh() call
 **Key design decisions:**
 
 - **`SyncCoordinator`** uses `threading.Lock` — threads block while waiting.
-- **`AsyncCoordinator`** uses `asyncio.Lock` — coroutines **yield** without blocking the event loop.
-- The two are never mixed: `httpx.Client` uses the sync path, `httpx.AsyncClient` uses the async path.
+- **`AsyncCoordinator`** uses `asyncio.Lock` — coroutines **yield** without blocking the event loop. One lock is kept *per event loop*, so a single shared instance keeps working across repeated `asyncio.run()` calls, `pytest-asyncio` tests, and thread-per-loop servers.
+- The two are never mixed: `httpx.Client` uses the sync path, `httpx.AsyncClient` uses the async path. Pairing the wrong class with a client raises `TypeError` rather than silently sending an unauthenticated request.
+- Coordination is keyed on an internal **generation counter** first, and on the token value second. Refresh endpoints that are idempotent, cached, or have rotation disabled return the *same* token — a value-only comparison would silently degrade to one refresh per waiter. Keeping the value check as a *secondary* test means a token renewed **outside** this library (a background TTL thread, a sidecar, another process writing the same store) is still picked up without a redundant refresh.
+- When `refresh()` fails, the error is cached for `refresh_error_cooldown` seconds and replayed to waiters, so an auth server that is already struggling does not receive one retry per pending request.
 
 ---
 
@@ -157,52 +160,58 @@ auth = SingleFlightAuth(
     refresh: Callable[[], str],            # Fetches a new token, saves it, returns it
     is_unauthorized: Callable[              # Optional: customize 401 detection
         [httpx.Response], bool
-    ] = lambda r: r.status_code == 401,
-    max_retries: int = 1,                  # Max retry attempts after refresh
+    ] | None = None,                        # default: r.status_code == 401
+    max_retries: int = 1,                  # Retry attempts after refresh; 0 disables refresh
+    *,
+    header_name: str = "Authorization",    # e.g. "X-API-Key"
+    scheme: str = "Bearer",                # "" sends the bare token
+    raise_on_max_retries: bool = True,     # False → return the 401 instead of raising
+    refresh_wait_timeout: float | None = None,  # Bound the *wait* for someone else's refresh
+    refresh_error_cooldown: float = 1.0,   # Replay a failed refresh for N seconds
+    requires_response_body: bool | None = None,  # None = buffer only if a predicate needs it
 )
 ```
 
-### `AsyncSingleFlightAuth` — httpx async
+`AsyncSingleFlightAuth` takes the same arguments, with `refresh: Callable[[], Awaitable[str]]`.
+`RequestsSingleFlightAuth` takes the same arguments minus `requires_response_body`
+(`requests` always buffers the body before hooks run).
 
 ```python
-from singleflight_auth import AsyncSingleFlightAuth
+from singleflight_auth import AsyncSingleFlightAuth, RequestsSingleFlightAuth
 
-auth = AsyncSingleFlightAuth(
-    get_token: Callable[[], str],
-    refresh: Callable[[], Awaitable[str]],  # Must be an async function
-    is_unauthorized: Callable[[httpx.Response], bool] = ...,
-    max_retries: int = 1,
-)
-```
-
-### `RequestsSingleFlightAuth` — requests
-
-```python
-from singleflight_auth import RequestsSingleFlightAuth
-
-auth = RequestsSingleFlightAuth(
-    get_token: Callable[[], str],
-    refresh: Callable[[], str],
-    is_unauthorized: Callable[[requests.Response], bool] = ...,
-    max_retries: int = 1,
-)
+auth = AsyncSingleFlightAuth(get_token=get_access_token, refresh=async_refresh)
 
 session = requests.Session()
-session.auth = auth
+session.auth = RequestsSingleFlightAuth(get_token=get_access_token, refresh=refresh_access_token)
 ```
+
+#### Notable parameter semantics
+
+- **`max_retries=0`** means *"never refresh, hand me the unauthorized response"*. It does not raise.
+- **`get_token()` returning `None` or `""`** sends **no** auth header (rather than `"Bearer None"`), so the first request before login naturally 401s and triggers a refresh.
+- **`is_unauthorized` may read `response.content`.** Nothing is buffered up front: the body is read on demand the first time your predicate reaches for it, and buffered eagerly from then on. A status-code-only predicate (`r.status_code == 403`) therefore **never** forces buffering, so `client.stream()` stays lazy. Pass `requires_response_body=True` to always buffer, or `False` to forbid it — with `False`, a predicate that touches the body raises a `RuntimeError` telling you so rather than failing cryptically.
+
+  > **Two limits of that auto-detection**, both removed by passing `requires_response_body=True`:
+  > 1. Your predicate runs **twice** on the one response that first reaches for the body (once per auth instance). A predicate that counts or logs will double-fire once.
+  > 2. Detection works by letting `httpx.ResponseNotRead` escape your predicate. If your predicate catches its own exceptions (`try: ... except Exception: return False`), it swallows that signal, sees an empty body, and **silently reports "authorized"** — no refresh, no error.
+
+- **`refresh_wait_timeout` bounds the *wait*, not your `refresh()`.** It caps how long other callers queue behind an in-flight refresh. A blocking callable cannot be interrupted from outside — and killing it mid-flight could leave your token store half-written — so the winner always runs to completion. If it hangs forever, it holds the lock forever and every later request fails with `RefreshTimeoutError` instead of deadlocking silently. That is a visible failure, not a fix: **always give `refresh()` its own I/O timeout.**
+- **`refresh_error_cooldown`** stops a failing auth server from receiving one retry per pending request. Set it to `0` to attempt a refresh on every request.
 
 ### Exceptions
 
 | Exception | When |
 |---|---|
 | `RefreshFailedError` | Your `refresh()` callable raised an exception, or returned an empty/None token |
-| `MaxRetriesExceededError` | Still getting 401 after `max_retries` refresh attempts |
+| `RefreshTimeoutError` | `refresh_wait_timeout` elapsed while waiting for an in-flight refresh (subclass of `RefreshFailedError`) |
+| `MaxRetriesExceededError` | Still getting 401 after `max_retries` refresh attempts; carries `.response` |
 | `ReentrantRefreshError` | `refresh()` triggered the auth flow on the same client/session (would deadlock) |
-| `NonReplayableBodyError` | Request body is a stream/generator/file that cannot be replayed for retry |
+| `NonReplayableBodyError` | Request body is a generator or non-seekable stream that cannot be replayed for retry |
 
 ```python
 from singleflight_auth import (
     RefreshFailedError,
+    RefreshTimeoutError,
     MaxRetriesExceededError,
     ReentrantRefreshError,
     NonReplayableBodyError,
@@ -210,18 +219,29 @@ from singleflight_auth import (
 
 try:
     response = client.get("/protected")
+except RefreshTimeoutError:
+    # An in-flight refresh took too long — fail fast instead of parking forever
+    logger.error("Token refresh timed out")
 except RefreshFailedError as e:
     # refresh() raised — log out the user, redirect to login
     logger.error(f"Token refresh failed: {e.__cause__}")
-except MaxRetriesExceededError:
-    # Server keeps returning 401 even after refresh — something is very wrong
-    logger.error("Max retries exceeded, giving up")
+except MaxRetriesExceededError as e:
+    # Server keeps returning 401 even after refresh — inspect why
+    logger.error("Still %s: %s", e.response.status_code, e.response.headers.get("WWW-Authenticate"))
 except ReentrantRefreshError:
     # refresh() accidentally used the same client — fix your refresh() code
     logger.error("refresh() must use a separate client!")
 except NonReplayableBodyError:
     # Streaming upload got a 401 — buffer the body or handle differently
     logger.error("Cannot retry streaming uploads")
+```
+
+A *permanent* 401 (revoked account, missing scope) is not solved by refreshing.
+If you would rather handle it as a normal response than as an exception:
+
+```python
+auth = SingleFlightAuth(get_token=..., refresh=..., raise_on_max_retries=False)
+response = client.get("/admin-only")   # returns the 401 instead of raising
 ```
 
 ---
@@ -259,39 +279,64 @@ for url in urls:
     httpx.get(url, auth=auth)
 ```
 
-### Stream/generator/file bodies are not retry-safe
+### Don't pair the sync class with an async client
 
-If the request body is a generator, file handle, or other one-shot stream, it is consumed on the first send and cannot be replayed. Instead of silently sending an empty body, `NonReplayableBodyError` is raised. Buffer the body into `bytes` before sending:
+`SingleFlightAuth` is sync-only and `AsyncSingleFlightAuth` is async-only. Since the names differ by one word, a mismatch is easy to make — so each class raises `TypeError` on the flow it does not implement instead of letting the request through unauthenticated.
+
+```python
+auth = SingleFlightAuth(...)
+async with httpx.AsyncClient(auth=auth) as client:
+    await client.get("/data")   # TypeError: SingleFlightAuth is sync-only
+```
+
+### Generator and non-seekable bodies are not retry-safe
+
+If the request body is a generator or a non-seekable stream, it is consumed on the first send and cannot be replayed. Instead of silently sending an empty body, `NonReplayableBodyError` is raised. Buffer the body into `bytes` before sending:
 
 ```python
 # Correct — body is bytes, safe to retry
 data = my_file.read()
 client.post("/upload", content=data)
 
+# Also fine — httpx rewinds seekable multipart files on every send
+client.post("/upload", files={"f": open("photo.jpg", "rb")})
+
 # Risky — generator body cannot be replayed on 401
 client.post("/upload", content=my_generator())
+```
+
+### Bound the refresh wait
+
+`refresh()` with no timeout of its own can park every other thread or coroutine indefinitely. Give it one — and optionally a ceiling on how long waiters queue behind it:
+
+```python
+def refresh() -> str:
+    resp = httpx.post("https://auth.example.com/token", json={...}, timeout=10.0)
+    return resp.json()["access_token"]
+
+auth = SingleFlightAuth(get_token=..., refresh=refresh, refresh_wait_timeout=15.0)
 ```
 
 ---
 
 ## Limitations
 
-Intentionally out of scope for v0.1:
+Intentionally out of scope:
 
 | What | Why |
 |---|---|
+| **Single-process only** | Uses in-process locks (`threading.Lock` / `asyncio.Lock`). With 8 Gunicorn/Uvicorn workers you get up to 8 refreshes — one per worker — not one overall. Cross-process coordination (e.g. Redis) is not implemented |
 | **No OAuth2 flow implementation** | Bring your own `refresh()` logic — we don't dictate your auth scheme |
 | **No token storage** | Manage tokens yourself via `get_token`/`refresh` callbacks |
-| **Single-process only** | Uses in-process locks (`threading.Lock` / `asyncio.Lock`); does not work across multiple processes or machines (e.g., Gunicorn workers) |
-| **No `aiohttp` support** | `httpx` + `requests` only for v0.1 |
+| **No `aiohttp` support** | `httpx` + `requests` only |
 | **Reactive only** | Refreshes on 401; no proactive TTL-based refresh |
-| **Stream bodies not retried** | Generator/file/stream request bodies raise `NonReplayableBodyError` on 401 instead of silently losing data |
+| **Generator/non-seekable bodies not retried** | They raise `NonReplayableBodyError` on 401 instead of silently losing data. Seekable multipart uploads *are* retried |
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+See [CONTRIBUTING.md](https://github.com/alibeg-begow/singleflight_auth/blob/main/CONTRIBUTING.md) for development setup and guidelines.
 
 ```bash
 # Quick start for contributors:
@@ -299,7 +344,7 @@ git clone https://github.com/alibeg-begow/singleflight_auth.git
 cd singleflight_auth
 uv sync --all-extras --dev
 uv run pytest -v
-uv run mypy src --strict
+uv run mypy src tests --strict
 uv run ruff check .
 ```
 
@@ -307,4 +352,4 @@ uv run ruff check .
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](https://github.com/alibeg-begow/singleflight_auth/blob/main/LICENSE).

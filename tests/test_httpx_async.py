@@ -6,8 +6,6 @@ Uses pytest-httpserver (real local server) + pytest-asyncio.
 
 from __future__ import annotations
 
-import asyncio
-
 import httpx
 import pytest
 from pytest_httpserver import HTTPServer
@@ -32,9 +30,12 @@ class TestAsyncSingleFlightAuthHappyPath:
         httpserver.expect_request("/data").respond_with_handler(handler)
         store = {"access": "my-async-token"}
 
+        async def unused_refresh() -> str:
+            raise AssertionError("refresh() must not run on a 200 response")
+
         auth = AsyncSingleFlightAuth(
             get_token=lambda: store["access"],
-            refresh=lambda: asyncio.coroutine(lambda: "unused")(),  # type: ignore[call-arg]
+            refresh=unused_refresh,
         )
 
         async with httpx.AsyncClient(auth=auth, base_url=httpserver.url_for("/")) as client:
