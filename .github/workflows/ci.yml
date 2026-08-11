@@ -184,8 +184,25 @@ jobs:
         run: |
           ./.venv/bin/python -c "import sys; print('GIL disabled:', not sys._is_gil_enabled())"
 
-      - name: Run the coordinator tests
-        run: ./.venv/bin/python -m pytest tests/test_core.py -q --tb=short --count=5
+      # Split per class, each allowed to run even if an earlier one fails, so
+      # the checks UI pinpoints what breaks without the GIL.
+      - name: Sync coordinator (threading.Lock + threading.local)
+        continue-on-error: true
+        run: >
+          ./.venv/bin/python -m pytest -q --tb=short --count=5
+          tests/test_core.py::TestSyncCoordinator
+
+      - name: Async coordinator (asyncio.Lock per loop)
+        continue-on-error: true
+        run: >
+          ./.venv/bin/python -m pytest -q --tb=short --count=5
+          tests/test_core.py::TestAsyncCoordinator
+
+      - name: Coordinator invariants (ContextVar + WeakKeyDictionary registry)
+        continue-on-error: true
+        run: >
+          ./.venv/bin/python -m pytest -q --tb=short --count=5
+          tests/test_core.py::TestCoordinatorInvariants
 
   # Races are timing-dependent: a single green run proves little.
   repeat-stress:
