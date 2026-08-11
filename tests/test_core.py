@@ -21,6 +21,13 @@ from singleflight_auth import (
 )
 from singleflight_auth._core import AsyncCoordinator, SyncCoordinator
 
+# Cooldown timings for the failure-replay tests.  Kept deliberately generous:
+# the original 50 ms window left a 10 ms margin, which a loaded CI runner (or a
+# laptop building venvs in the background) blows straight through, turning a
+# correct implementation into a red build.
+COOLDOWN = 0.3
+PAST_COOLDOWN = COOLDOWN * 3
+
 # ---------------------------------------------------------------------------
 # SyncCoordinator
 # ---------------------------------------------------------------------------
@@ -166,7 +173,7 @@ class TestSyncCoordinator:
             raise RuntimeError("still down")
 
         coord: SyncCoordinator[str] = SyncCoordinator(
-            get_token=lambda: "stale", refresh=refresh, error_cooldown=0.05
+            get_token=lambda: "stale", refresh=refresh, error_cooldown=COOLDOWN
         )
         generation = coord.token_generation()
 
@@ -175,7 +182,7 @@ class TestSyncCoordinator:
                 coord.resolve(generation, stale_token="stale")
         assert refresh_calls == 1, "second call inside the window must be served from cache"
 
-        time.sleep(0.06)
+        time.sleep(PAST_COOLDOWN)
         with pytest.raises(RuntimeError):
             coord.resolve(generation, stale_token="stale")
         assert refresh_calls == 2, "after the cooldown a fresh attempt must be made"
@@ -192,12 +199,12 @@ class TestSyncCoordinator:
             return f"token-{attempts}"
 
         coord: SyncCoordinator[str] = SyncCoordinator(
-            get_token=lambda: "stale", refresh=refresh, error_cooldown=0.01
+            get_token=lambda: "stale", refresh=refresh, error_cooldown=COOLDOWN
         )
         with pytest.raises(RuntimeError):
             coord.resolve(coord.token_generation(), stale_token="stale")
 
-        time.sleep(0.02)
+        time.sleep(PAST_COOLDOWN)
         token, _ = coord.resolve(coord.token_generation(), stale_token="stale")
         assert token == "token-2"
 
@@ -629,12 +636,12 @@ class TestCoordinatorInvariants:
             return f"token-{attempts}"
 
         coord: AsyncCoordinator[str] = AsyncCoordinator(
-            get_token=lambda: "stale", refresh=refresh, error_cooldown=0.05
+            get_token=lambda: "stale", refresh=refresh, error_cooldown=COOLDOWN
         )
         with pytest.raises(RuntimeError):
             await coord.resolve(coord.token_generation(), stale_token="stale")
 
-        await asyncio.sleep(0.06)
+        await asyncio.sleep(PAST_COOLDOWN)
         token, _ = await coord.resolve(coord.token_generation(), stale_token="stale")
         assert token == "token-2"
 

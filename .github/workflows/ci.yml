@@ -91,22 +91,31 @@ jobs:
           name: dist
           path: dist/
 
+      - name: Show the environment we are installing into
+        run: |
+          uv --version
+          ls -la dist/
+
       - name: Install just this path
         run: |
-          uv venv
+          set -euxo pipefail
           if [ "${{ matrix.artifact }}" = "wheel" ]; then
-            target=$(ls dist/*.whl)
+            target="$(ls dist/*.whl)"
           else
-            target=$(ls dist/*.tar.gz)
+            target="$(ls dist/*.tar.gz)"
           fi
-          uv pip install "${target}${{ matrix.extra }}"
+          uv venv .venv
+          # PEP 508 direct reference: the unambiguous way to combine extras
+          # with a local artifact ("path.whl[extra]" is not portable syntax).
+          uv pip install --python .venv \
+            "singleflight-auth${{ matrix.extra }} @ file://$(readlink -f "$target")"
 
       - name: Import smoke test
-        run: uv run --no-project python -c "import singleflight_auth; print(singleflight_auth.__version__)"
+        run: ./.venv/bin/python -c "import singleflight_auth; print(singleflight_auth.__version__)"
 
       - name: Integration classes resolve when their extra is installed
         run: |
-          uv run --no-project python - <<'PY'
+          ./.venv/bin/python - <<'PY'
           import importlib.util as u, singleflight_auth as sfa
           if u.find_spec("httpx"):
               assert sfa.SingleFlightAuth and sfa.AsyncSingleFlightAuth
