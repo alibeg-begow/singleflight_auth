@@ -1,6 +1,6 @@
 # singleflight-auth
 
-> **Single-flight token refresh for `httpx` and `requests`**: when hundreds or thousands of parallel requests all get a 401, your `refresh()` function is called **exactly once** — per process. Coordination uses in-process locks, so a Gunicorn/Uvicorn deployment with 8 workers still performs up to 8 refreshes, one per worker. See [Limitations](#limitations).
+> **Single-flight token refresh for `httpx` and `requests`**: when parallel requests hit a 401, your `refresh()` function is called **exactly once** per process. Coordination uses in-process locks (see [Limitations](#limitations)).
 
 [![PyPI version](https://img.shields.io/pypi/v/singleflight-auth.svg?v=1)](https://pypi.org/project/singleflight-auth/)
 [![Python versions](https://img.shields.io/pypi/pyversions/singleflight-auth.svg?v=1)](https://pypi.org/project/singleflight-auth/)
@@ -78,7 +78,7 @@ response = session.get("https://api.example.com/protected")
 | [`requests_oauth2client`](https://pypi.org/project/requests-oauth2client/) | Full OAuth2/OIDC for `requests` | Full spec implementation — overkill if you only want "call my refresh on 401" |
 | [`singleflight`](https://pypi.org/project/singleflight/) | General call-coalescing (Go's groupcache port) | Not HTTP/auth-specific; no 401 detection or retry logic |
 
-**Our position:** If you need full OAuth2 flows, use `httpx-auth` or `requests_oauth2client` — they're excellent. If you already have your own refresh logic (JWT endpoint, custom auth API, or even an OAuth2 token endpoint you call manually) and just want to **prevent parallel 401s from stomping each other** — this library is for you.
+**Our position:** If you need full OAuth2 flows, use `httpx-auth` or `requests_oauth2client`. If you already have your own refresh logic and simply want to **prevent concurrent 401s from stampeding your auth server**, this library is for you.
 
 > *"Bring your own refresh logic — we handle the concurrency."*
 
@@ -141,10 +141,10 @@ Result: N concurrent 401s → exactly 1 refresh() call
 **Key design decisions:**
 
 - **`SyncCoordinator`** uses `threading.Lock` — threads block while waiting.
-- **`AsyncCoordinator`** uses `asyncio.Lock` — coroutines **yield** without blocking the event loop. One lock is kept *per event loop*, so a single shared instance keeps working across repeated `asyncio.run()` calls, `pytest-asyncio` tests, and thread-per-loop servers.
-- The two are never mixed: `httpx.Client` uses the sync path, `httpx.AsyncClient` uses the async path. Pairing the wrong class with a client raises `TypeError` rather than silently sending an unauthenticated request.
-- Coordination is keyed on an internal **generation counter** first, and on the token value second. Refresh endpoints that are idempotent, cached, or have rotation disabled return the *same* token — a value-only comparison would silently degrade to one refresh per waiter. Keeping the value check as a *secondary* test means a token renewed **outside** this library (a background TTL thread, a sidecar, another process writing the same store) is still picked up without a redundant refresh.
-- When `refresh()` fails, the error is cached for `refresh_error_cooldown` seconds and replayed to waiters, so an auth server that is already struggling does not receive one retry per pending request.
+- **`AsyncCoordinator`** uses `asyncio.Lock` — coroutines yield without blocking the event loop. One lock is kept per event loop, ensuring safety across repeated `asyncio.run()` calls and testing suites.
+- **Strict runtime validation**: Pairing sync and async classes incorrectly raises `TypeError` instead of sending unauthenticated requests.
+- **Generation counter + value check**: Coordination uses an internal generation counter first (handling idempotent refresh endpoints), with token value as a secondary check (handling external renewals like background workers).
+- **Error caching**: Failed refreshes are cached for `refresh_error_cooldown` seconds and replayed to queued waiters, preventing auth server overload.
 
 ---
 
@@ -189,14 +189,10 @@ session.auth = RequestsSingleFlightAuth(get_token=get_access_token, refresh=refr
 
 - **`max_retries=0`** means *"never refresh, hand me the unauthorized response"*. It does not raise.
 - **`get_token()` returning `None` or `""`** sends **no** auth header (rather than `"Bearer None"`), so the first request before login naturally 401s and triggers a refresh.
-- **`is_unauthorized` may read `response.content`.** Nothing is buffered up front: the body is read on demand the first time your predicate reaches for it, and buffered eagerly from then on. A status-code-only predicate (`r.status_code == 403`) therefore **never** forces buffering, so `client.stream()` stays lazy. Pass `requires_response_body=True` to always buffer, or `False` to forbid it — with `False`, a predicate that touches the body raises a `RuntimeError` telling you so rather than failing cryptically.
-
-  > **Two limits of that auto-detection**, both removed by passing `requires_response_body=True`:
-  > 1. Your predicate runs **twice** on the one response that first reaches for the body (once per auth instance). A predicate that counts or logs will double-fire once.
-  > 2. Detection works by letting `httpx.ResponseNotRead` escape your predicate. If your predicate catches its own exceptions (`try: ... except Exception: return False`), it swallows that signal, sees an empty body, and **silently reports "authorized"** — no refresh, no error.
-
-- **`refresh_wait_timeout` bounds the *wait*, not your `refresh()`.** It caps how long other callers queue behind an in-flight refresh. A blocking callable cannot be interrupted from outside — and killing it mid-flight could leave your token store half-written — so the winner always runs to completion. If it hangs forever, it holds the lock forever and every later request fails with `RefreshTimeoutError` instead of deadlocking silently. That is a visible failure, not a fix: **always give `refresh()` its own I/O timeout.**
-- **`refresh_error_cooldown`** stops a failing auth server from receiving one retry per pending request. Set it to `0` to attempt a refresh on every request.
+- **`is_unauthorized` may read `response.content`.** The body is buffered on demand only if your predicate accesses it, keeping `client.stream()` lazy. Use `requires_response_body=True` to always buffer, or `False` to forbid body reading.
+  > **Note on auto-detection**: Avoid catching broad exceptions (`except Exception`) inside your predicate, as swallowing `ResponseNotRead` prevents buffering detection.
+- **`refresh_wait_timeout` bounds the *wait*, not `refresh()`.** Caps how long other callers queue behind an in-flight refresh. Always set an explicit I/O timeout inside `refresh()` to prevent hanging.
+- **`refresh_error_cooldown`** stops a failing auth server from receiving one retry per pending request. Set to `0` to attempt a refresh on every request.
 
 ### Exceptions
 
